@@ -8,3 +8,8 @@ scikit-learn
 pandas
 numpy
 scipy
+transformers
+openai
+google-genai
+python-dotenv
+joblib
