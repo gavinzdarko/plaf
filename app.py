@@ -36,6 +36,7 @@ from core.defenses import (
 from llm.llm_probe import LLMTarget, LLMMembershipProbe
 from llm.gemini_probe import GeminiTarget, GeminiMembershipProbe
 from llm.openai_probe import OpenAITarget, OpenAIMembershipProbe
+from llm.extraction_probe import ExtractionProbe, ExtractionReport
 
 # ── Page config ─────────────────────────────────────────────────────────────
 
@@ -510,6 +511,7 @@ with st.sidebar:
     st.caption("Tests OpenAI API via real logprobs")
     openai_n = st.slider("OpenAI samples per group", 5, 50, 10, step=5)
     run_openai_btn = st.button("Run OpenAI Audit", use_container_width=True)
+    run_extraction_btn = st.button("Run Extraction Attack", use_container_width=True)
 
 # ── Load data ───────────────────────────────────────────────────────────────
 
@@ -1139,3 +1141,113 @@ with tab4:
                 '</div>',
                 unsafe_allow_html=True,
             )
+
+    # ── Active Extraction Attack ────────────────────────────────────────────
+    st.markdown("---")
+    st.markdown('<p class="section-header">ACTIVE EXTRACTION ATTACK</p>', unsafe_allow_html=True)
+    st.markdown(
+        '<p style="color:#888; font-size:0.95rem;">'
+        'Actively attempt to extract memorized training data using prompt manipulation strategies: '
+        'direct recall, prefix completion, persona manipulation, and template extraction. '
+        'Measures refusal rate, specificity, and cross-query consistency.'
+        '</p>',
+        unsafe_allow_html=True,
+    )
+
+    if run_extraction_btn:
+        with st.spinner("Running extraction attacks against OpenAI (20 prompts x 2 queries each)..."):
+            progress_ex = st.progress(0, text="Starting extraction...")
+
+            from openai import OpenAI as OAI
+            from dotenv import load_dotenv
+            load_dotenv(PROJECT_ROOT / ".env")
+            oai_client = OAI(api_key=os.getenv("OPENAI_API_KEY"))
+
+            def query_openai(prompt: str) -> str:
+                resp = oai_client.chat.completions.create(
+                    model="gpt-4o-mini",
+                    messages=[{"role": "user", "content": prompt}],
+                    max_tokens=200,
+                    temperature=0.0,
+                )
+                return resp.choices[0].message.content or ""
+
+            extraction = ExtractionProbe(query_openai)
+
+            def ex_progress(frac, msg):
+                progress_ex.progress(int(frac * 100), text=msg)
+
+            ex_report = extraction.run(progress_callback=ex_progress)
+            progress_ex.progress(100, text="Extraction complete.")
+
+        st.session_state["extraction_report"] = ex_report
+
+    if "extraction_report" in st.session_state:
+        ex = st.session_state["extraction_report"]
+
+        # Risk color
+        ex_colors = {"LOW": "green", "MEDIUM": "yellow", "HIGH": "orange", "CRITICAL": "red"}
+        ex_color = ex_colors.get(ex.risk_level, "red")
+        ec = RISK_COLORS.get(ex_color, "#EF4444")
+
+        exc1, exc2, exc3, exc4 = st.columns(4)
+        with exc1:
+            st.markdown(
+                f'<div class="risk-card" style="border: 2px solid {ec}; color: {ec};">'
+                f'<div style="font-size: 1.4rem; font-weight: 700;">{ex.risk_level}</div>'
+                f'<div style="color:#888; font-size:0.75rem;">Extraction Risk</div></div>',
+                unsafe_allow_html=True)
+        with exc2:
+            st.markdown(
+                f'<div class="metric-box"><div class="metric-label">Leak Rate</div>'
+                f'<div class="metric-value">{ex.overall_leak_rate:.0%}</div></div>',
+                unsafe_allow_html=True)
+        with exc3:
+            st.markdown(
+                f'<div class="metric-box"><div class="metric-label">Specificity</div>'
+                f'<div class="metric-value">{ex.overall_specificity:.2f}</div></div>',
+                unsafe_allow_html=True)
+        with exc4:
+            st.markdown(
+                f'<div class="metric-box"><div class="metric-label">Consistency</div>'
+                f'<div class="metric-value">{ex.overall_consistency:.2f}</div></div>',
+                unsafe_allow_html=True)
+
+        # Strategy breakdown
+        st.markdown("**Strategy Breakdown**")
+        strategy_names = list(set(r.strategy for r in ex.results))
+        for strat in strategy_names:
+            strat_results = [r for r in ex.results if r.strategy == strat]
+            refused = sum(1 for r in strat_results if r.refused)
+            leaked = sum(1 for r in strat_results if r.risk_level in ("HIGH", "CRITICAL"))
+            avg_spec = np.mean([r.specificity_score for r in strat_results if not r.refused]) if any(not r.refused for r in strat_results) else 0
+
+            if leaked > 0:
+                strat_css = "mitigation-critical"
+            elif refused < len(strat_results):
+                strat_css = "mitigation-high"
+            else:
+                strat_css = "mitigation-moderate"
+
+            st.markdown(
+                f'<div class="{strat_css}">'
+                f'<strong>{strat}</strong> — '
+                f'{len(strat_results) - refused}/{len(strat_results)} responded, '
+                f'{leaked} high-risk, avg specificity {avg_spec:.2f}'
+                f'</div>',
+                unsafe_allow_html=True)
+
+        # Sample extractions
+        st.markdown("**Sample Extractions**")
+        ex_rows = []
+        for r in ex.results:
+            ex_rows.append({
+                "Strategy": r.strategy,
+                "Prompt": r.prompt[:60] + "...",
+                "Refused": "Yes" if r.refused else "No",
+                "Specificity": f"{r.specificity_score:.2f}",
+                "Consistency": f"{r.consistency_score:.2f}",
+                "Risk": r.risk_level,
+                "Response Preview": r.response[:80] + "..." if len(r.response) > 80 else r.response,
+            })
+        st.dataframe(pd.DataFrame(ex_rows), use_container_width=True, hide_index=True)
