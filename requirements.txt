@@ -1,0 +1,10 @@
+torch>=2.0
+streamlit>=1.30
+plotly>=5.0
+adversarial-robustness-toolbox
+opacus
+faker
+scikit-learn
+pandas
+numpy
+scipy
